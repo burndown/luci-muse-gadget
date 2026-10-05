@@ -100,9 +100,59 @@ logread -e musegadget | tail
 
 **卸载。** `sh install.sh --uninstall` 删除程序但保留 `/etc/musegadget`（配对数据），加 `--purge` 一并删除。
 
-## 安全
+## 权限与安全
 
-Muse 获得的是你勾选的能力，加上（默认开启的）一个以 `muse` 账号运行的 shell 和文件读写。这个账号权限很低，但它仍然是路由器上的一个普通账号，局域网内能访问的服务它都能访问。配对包和 SDK token 等同于密码：不要发到聊天群或公开的地方，一旦泄露，在 gadgets.muse.ai 吊销 SDK token，并在 LuCI 里点 Unpair 重新配对。服务拒绝以 root 身份运行命令。
+Muse 能在你的设备上执行命令，所以这一节请读完再决定开放什么。
+
+### 谁以什么身份运行
+
+服务由 procd 以 root 启动，只负责连接 Muse 和调度。Muse 发来的通用命令（`system.run`、`file.read`、`file.write`）会被**降权**到 `muse` 账号再执行：SDK 为每条命令的子进程设置该账号的 uid、gid 和附加组，并把环境变量重置为固定的 PATH 和 HOME。`run_as` 为空或设为 `root` 时，服务拒绝启动，不会退回 root。
+
+OpenWrt 上没有 `adduser`、`su` 和 `sudo`，所以启动脚本用 `shadow-useradd` 提供的 `useradd -M -s /bin/bash muse` 自动创建这个账号。它没有设密码，没有附加组，不能直接登录。SDK 的 `system.run` 固定调用 `/bin/bash -c`，而 OpenWrt 默认只有 busybox ash，所以安装脚本会装 `bash`。
+
+配对令牌和 SDK token 存放在 `/etc/musegadget`，目录权限 700、属主 root，`muse` 账号读不了，Muse 也就拿不到自己的凭证。本地 socket `/var/run/musegadget.sock` 属主 root、属组 `muse`、权限 660，只有 `muse` 账号下的程序才能用它给 Muse 发消息。
+
+### `muse` 账号在 OpenWrt 上实际能做什么
+
+下面是在 ImmortalWrt 25.12.1 上，用 `muse` 的 uid 实际执行得到的结果，不同系统和已装插件可能不一样：
+
+| | 结果 |
+|---|---|
+| 读 `/etc/shadow` | 拒绝 |
+| 读 `/etc/config/` 里的 `network`、`dhcp`、`dropbear`、`rpcd`、`samba4`、`ddns-go` | 拒绝（这些文件权限是 600） |
+| 读 `/etc/musegadget`（令牌目录） | 拒绝 |
+| 在 `/etc` 下写文件 | 拒绝 |
+| 调用 ubus | 只能看到 `dnsmasq.dns`，`system board`、`network.interface dump` 都找不到，也读不到 `logread` |
+| 在 `/tmp`、`/home/muse` 下读写 | 允许 |
+| `ip neigh` 查看邻居、对局域网主机建立 TCP 连接 | 允许 |
+| 读全员可读（644）的文件 | 允许 |
+
+没有实测的有两项：让 `muse` 执行 `reboot` 或 `/etc/init.d/xxx restart`。这两个万一没挡住会直接断网，所以没有试。根据 ubus 访问受限和 `/etc` 不可写来推断它做不到，但这只是推断。
+
+**要特别注意**：路由器上凡是全员可读的文件，`muse` 的 shell 都读得到。我的测试机上，`/etc/config/firewall`、`/etc/config/openclash` 以及 OpenClash 的订阅配置目录里的文件都是 644，这类配置通常含有代理节点地址和凭证。这是系统和那些插件自己的权限设置，不是本项目造成的，但开着通用 shell 时它就成了暴露面。你可以用 `ls -l /etc/config` 检查，对不需要公开的文件执行 `chmod 600`，或者直接关掉通用 shell。另外，`muse` 账号能访问整个局域网，等于给了 Muse 一个局域网内的跳板。
+
+### 具名命令的权限模型
+
+`router.*` 具名命令不经过降权，**在服务进程里以 root 执行**，因为它们要读 ubus、系统日志，要重启服务。所以它们的安全靠另外几道约束：每个命令只执行写死的参数列表，不经过 shell；所有外部参数都经过校验，主机名和服务名用严格的正则，数字限定范围；`router.service_control` 只能操作你在白名单里填写的服务，并且硬性禁止操作 musegadget 自己；`router.reboot` 必须带 `confirm=true`；没有勾选的命令既不会注册给 Muse，被调用时也会拒绝。
+
+这里有一个取舍：具名命令的权限比通用 shell 更高（root），换来的是可控，它能做的事是固定的，且是你勾选的。你可以只勾只读项，再关掉“Allow a shell”和“Allow file access”，这样 Muse 能做的事比默认配置更少。
+
+### 建议的配置
+
+| 你的需求 | 建议 |
+|---|---|
+| 想试试，不太放心 | 只勾 `router.status`、`router.ping`、`router.dns_lookup`，关掉通用 shell 和文件读写 |
+| 想让 Muse 帮你看家里网络 | 再勾 `router.clients`、`router.traffic`、`router.log`，同样关掉通用 shell |
+| 想让 Muse 能处理故障 | 再开 `router.service_control`，白名单里只填需要它重启的服务，不要填 `network`、`firewall`、`dropbear` 这类关键服务 |
+| 想让 Muse 能重启路由器 | 开 `router.reboot`，务必想清楚，并确认你能在它重启后找到办法恢复 |
+
+### 数据去向
+
+只读不等于没有隐私影响。命令的返回结果会发给 Muse 的云端：`router.clients` 会带上局域网设备的名字和 MAC 地址，`router.log` 可能包含主机名、IP 和账号相关的日志，`router.status` 会带上你的接口地址。只勾你需要的。
+
+### 令牌与泄露处理
+
+配对包和 SDK token 等同于密码：不要发到聊天群或公开的地方。SDK token 按官方条款仅限个人使用，不能共享。一旦泄露，在 gadgets.muse.ai 吊销 SDK token，在 LuCI 里点 Unpair，再重新配对。
 
 ## 它是怎么工作的
 
@@ -126,9 +176,9 @@ files/www/luci-static/resources/view/musegadget/main.js   LuCI 页面
 
 ## 验证情况
 
-在一台 ImmortalWrt 25.12.1 x86_64（PVE 虚拟机）上验证过：完整配对流程（用另一台 Debian 机器的 Intel AX210 蓝牙）走通；服务连上 Muse 并注册成功，Muse App 里设备显示在线，Muse 实际调用过 `system.run`；LuCI 页面打开正常，状态实时显示，“重启”按钮生效，能勾选能力；路由器重启后服务自动启动并重新注册成功；每个具名命令的处理函数都在路由器上直接调用测过，参数注入被拒绝，服务重启后日志确认已广播这些命令。
+在一台 ImmortalWrt 25.12.1 x86_64（PVE 虚拟机）上验证过：完整配对流程（用另一台 Debian 机器的 Intel AX210 蓝牙）走通；服务连上 Muse 并注册成功，Muse App 里设备显示在线，Muse 实际调用过 `system.run`；LuCI 页面打开正常，状态实时显示，“重启”按钮生效，能勾选能力；路由器重启后服务自动启动并重新注册成功；以 `muse` 的 uid 实测了它的权限边界（见上面的“权限与安全”）；每个具名命令的处理函数都在路由器上直接调用测过，参数注入被拒绝，服务重启后日志确认已广播这些命令。
 
-没有验证的：Muse 实际调用具名命令（本项目写完后）；页面里的导入配对包、保存 token、停止、解除配对按钮没有点过（后端层面测过）；`router.service_control` 的成功路径和 `router.reboot` 没有实际执行；`install.sh` 没有在干净系统上完整跑过，opkg 分支没测；非 x86 架构没测。
+没有验证的：`muse` 账号执行 `reboot` 和 `/etc/init.d` 重启服务（怕断网，没试）；Muse 实际调用具名命令（本项目写完后）；页面里的导入配对包、保存 token、停止、解除配对按钮没有点过（后端层面测过）；`router.service_control` 的成功路径和 `router.reboot` 没有实际执行；`install.sh` 没有在干净系统上完整跑过，opkg 分支没测；非 x86 架构没测。
 
 没有做成 `.ipk` / `.apk` 软件包，目前通过安装脚本分发。
 
