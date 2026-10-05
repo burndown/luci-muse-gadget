@@ -4,7 +4,7 @@
 
 官方 SDK 面向树莓派和 Debian：安装脚本依赖 apt 和 systemd，配对依赖蓝牙。本项目解决三件事：让它能在 OpenWrt 的 procd 和 musl 环境下跑；把唯一需要蓝牙的配对步骤拆出来，借一台带蓝牙的 Linux 机器做一次就行；把路由器能提供的能力做成可勾选的命令，而不是只给 Muse 一个低权限 shell。
 
-这是社区项目，和 Meta 没有关联。SDK 本身是 Meta 的 Apache-2.0 项目，使用须遵守其 [Gadget SDK Terms](https://gadgets.muse.ai/sdk-terms)。
+这是社区项目，和 Meta 没有关联，也没有得到 Meta 的认可。SDK 本身是 Meta 的 Apache-2.0 项目，本仓库不包含 SDK 源码，安装时从 Meta 官方仓库下载。使用时须遵守其 [Gadget SDK Terms](https://gadgets.muse.ai/sdk-terms)：SDK token 仅限个人、非商业使用，不能与他人共享，也不能用来访问别人的 Muse 账号。每个使用者请生成自己的 token。
 
 ## 开始之前
 
@@ -131,3 +131,7 @@ files/www/luci-static/resources/view/musegadget/main.js   LuCI 页面
 没有验证的：Muse 实际调用具名命令（本项目写完后）；页面里的导入配对包、保存 token、停止、解除配对按钮没有点过（后端层面测过）；`router.service_control` 的成功路径和 `router.reboot` 没有实际执行；`install.sh` 没有在干净系统上完整跑过，opkg 分支没测；重启后自动重连没测；非 x86 架构没测。
 
 没有做成 `.ipk` / `.apk` 软件包，目前通过安装脚本分发。
+
+## 许可
+
+本项目以 Apache License 2.0 发布，见 [LICENSE](LICENSE)。Muse Gadget SDK 是 Meta 的项目，同样采用 Apache-2.0，并另有 Gadget SDK Terms 约束 SDK token 的使用。
