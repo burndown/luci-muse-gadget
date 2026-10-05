@@ -150,7 +150,7 @@ return view.extend({
 		if (!caps.length)
 			o.description = _('The capability list could not be loaded. Is the service installed?');
 		o = cs.option(form.DynamicList, 'control_service', _('Services Muse may control'),
-			_('Used by "Control services". Muse can only start, stop or restart the services named here, for example dropbear or openclash.'));
+			_('Used by "Control services". Muse can only start, stop or restart the services named here, for example dnsmasq.'));
 		o.optional = true;
 
 		poll.add(function() {
