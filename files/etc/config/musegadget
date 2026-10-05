@@ -1,0 +1,9 @@
+config musegadget 'main'
+	option enabled '0'
+	option run_as 'muse'
+	# Generic SDK commands: a shell and file access as the run_as account.
+	option allow_shell '1'
+	option allow_files '1'
+	# Router capabilities advertised to Muse, see the LuCI page for the list.
+	# list capability 'router.status'
+	# list control_service 'dropbear'

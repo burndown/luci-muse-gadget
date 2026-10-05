@@ -1,0 +1,13 @@
+{
+	"luci-app-musegadget": {
+		"description": "Grant access to Muse Gadget",
+		"read": {
+			"ubus": { "musegadget": [ "status", "log", "capabilities" ] },
+			"uci": [ "musegadget" ]
+		},
+		"write": {
+			"ubus": { "musegadget": [ "import_bundle", "set_token", "unpair", "service" ] },
+			"uci": [ "musegadget" ]
+		}
+	}
+}

@@ -1,0 +1,13 @@
+{
+	"admin/services/musegadget": {
+		"title": "Muse Gadget",
+		"action": {
+			"type": "view",
+			"path": "musegadget/main"
+		},
+		"depends": {
+			"acl": [ "luci-app-musegadget" ],
+			"uci": { "musegadget": true }
+		}
+	}
+}

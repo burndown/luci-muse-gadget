@@ -1,0 +1,168 @@
+#!/bin/sh
+# rpcd backend for luci-app-musegadget.
+# Methods: status, log, import_bundle, set_token, unpair, service.
+
+. /usr/share/libubox/jshn.sh
+
+STATE="${MUSEGADGET_STATE:-/etc/musegadget}"
+CODE="${MUSEGADGET_CODE:-/usr/lib/musegadget}"
+INIT="${MUSEGADGET_INIT:-/etc/init.d/musegadget}"
+TOKEN_RE='^mgst_[A-Za-z0-9_-]{43}$'
+MAC_RE='^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'
+
+reply_ok() {
+	json_init
+	json_add_boolean ok 1
+	json_dump
+}
+
+reply_err() {
+	json_init
+	json_add_boolean ok 0
+	json_add_string error "$1"
+	json_dump
+}
+
+is_running() {
+	pgrep -f "musegadget_router run" >/dev/null 2>&1
+}
+
+write_secret() {
+	# write_secret FILE CONTENT: atomic, owner-only
+	( umask 077; printf '%s' "$2" > "$1.tmp" ) && mv "$1.tmp" "$1"
+}
+
+do_status() {
+	local installed=0 paired=0 token=0 running=0 deps=0 mac="" suffix=""
+
+	[ -d "$CODE/musegadget" ] && installed=1
+	[ -s "$STATE/pairing.json" ] && paired=1
+	[ -s "$STATE/sdk_token" ] && token=1
+	is_running && running=1
+	if [ "$installed" = 1 ] && PYTHONPATH="$CODE:$CODE/lib" python3 -c \
+		'import cryptography, websockets.asyncio.client, musegadget' >/dev/null 2>&1; then
+		deps=1
+	fi
+	if [ -s "$STATE/identity.json" ]; then
+		mac="$(jsonfilter -i "$STATE/identity.json" -e '@.mac')"
+		suffix="$(printf '%s' "$mac" | tr -d ':' | cut -c7-12)"
+	fi
+
+	json_init
+	json_add_boolean installed "$installed"
+	json_add_boolean deps_ok "$deps"
+	json_add_boolean paired "$paired"
+	json_add_boolean has_token "$token"
+	json_add_boolean running "$running"
+	json_add_string node_id "${suffix:+homelink-$suffix}"
+	json_add_string ble_name "${suffix:+MuseGadget$(printf '%s' "$suffix" | tr a-f A-F)}"
+	json_dump
+}
+
+do_capabilities() {
+	local out
+	out="$(PYTHONPATH="$CODE:$CODE/lib" python3 -m musegadget_router catalog 2>/dev/null)"
+	[ -n "$out" ] || out='[]'
+	printf '{ "capabilities": %s }\n' "$out"
+}
+
+do_log() {
+	json_init
+	json_add_string log "$(logread -e musegadget 2>/dev/null | tail -n 60)"
+	json_dump
+}
+
+do_import_bundle() {
+	local bundle decoded mac pairing token access
+
+	json_load "$1" 2>/dev/null
+	json_get_var bundle bundle
+
+	bundle="$(printf '%s' "$bundle" | tr -d ' \t\r\n')"
+	case "$bundle" in
+		MUSE1:*) bundle="${bundle#MUSE1:}" ;;
+		*) reply_err "not a Muse pairing bundle (it should start with MUSE1:)"; return ;;
+	esac
+	[ "${#bundle}" -le 20000 ] || { reply_err "bundle is too large"; return; }
+
+	# OpenWrt's busybox has no base64 applet; python3 is a hard dependency anyway.
+	decoded="$(printf '%s' "$bundle" | python3 -c 'import base64, sys; sys.stdout.write(base64.b64decode(sys.stdin.read(), validate=True).decode())' 2>/dev/null)"
+	[ -n "$decoded" ] || { reply_err "bundle is not valid base64"; return; }
+
+	mac="$(jsonfilter -s "$decoded" -e '@.identity.mac' 2>/dev/null)"
+	pairing="$(jsonfilter -s "$decoded" -e '@.pairing' 2>/dev/null)"
+	access="$(jsonfilter -s "$decoded" -e '@.pairing.access_token' 2>/dev/null)"
+	token="$(jsonfilter -s "$decoded" -e '@.sdk_token' 2>/dev/null)"
+
+	printf '%s' "$mac" | grep -Eq "$MAC_RE" || { reply_err "bundle has an invalid device identity"; return; }
+	[ -n "$pairing" ] && [ -n "$access" ] || { reply_err "bundle has no pairing credentials"; return; }
+	printf '%s' "$token" | grep -Eq "$TOKEN_RE" || { reply_err "bundle has an invalid SDK token"; return; }
+
+	"$INIT" stop >/dev/null 2>&1
+	mkdir -p "$STATE" && chmod 700 "$STATE"
+	write_secret "$STATE/identity.json" "{\"mac\": \"$mac\"}" &&
+	write_secret "$STATE/pairing.json" "$pairing" &&
+	write_secret "$STATE/sdk_token" "$token" ||
+		{ reply_err "could not write $STATE"; return; }
+
+	"$INIT" start >/dev/null 2>&1
+	reply_ok
+}
+
+do_set_token() {
+	local token
+	json_load "$1" 2>/dev/null
+	json_get_var token token
+	token="$(printf '%s' "$token" | tr -d ' \t\r\n')"
+	printf '%s' "$token" | grep -Eq "$TOKEN_RE" || { reply_err "invalid SDK token"; return; }
+	mkdir -p "$STATE" && chmod 700 "$STATE"
+	write_secret "$STATE/sdk_token" "$token" || { reply_err "could not write $STATE"; return; }
+	"$INIT" restart >/dev/null 2>&1
+	reply_ok
+}
+
+do_unpair() {
+	"$INIT" stop >/dev/null 2>&1
+	rm -f "$STATE/pairing.json"
+	reply_ok
+}
+
+do_service() {
+	local action
+	json_load "$1" 2>/dev/null
+	json_get_var action action
+	case "$action" in
+		start|stop|restart) "$INIT" "$action" >/dev/null 2>&1; reply_ok ;;
+		*) reply_err "unknown action" ;;
+	esac
+}
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+	"status": {},
+	"log": {},
+	"capabilities": {},
+	"import_bundle": { "bundle": "string" },
+	"set_token": { "token": "string" },
+	"unpair": {},
+	"service": { "action": "string" }
+}
+EOF
+		;;
+	call)
+		input=""
+		read -r input
+		case "$2" in
+			status) do_status ;;
+			log) do_log ;;
+			capabilities) do_capabilities ;;
+			import_bundle) do_import_bundle "$input" ;;
+			set_token) do_set_token "$input" ;;
+			unpair) do_unpair ;;
+			service) do_service "$input" ;;
+			*) reply_err "unknown method" ;;
+		esac
+		;;
+esac
